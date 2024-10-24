@@ -1,0 +1,30 @@
+# Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.venv
+
+# carlar
+carla
+
+# dataset
+data
+LAVIS/data
+vision_encoder/data
+vision_encoder/data_temp
+# */data
+
+# model
+model_temp
+
+# output
+LAVIS/lavis/output
+vision_encoder/output
+# */output
+
+
+
+# *.jpg
+# *.png
