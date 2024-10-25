@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./vision_encoder/FL-LMDrive"
+    ]
+}
