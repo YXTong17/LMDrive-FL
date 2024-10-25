@@ -47,6 +47,7 @@ from .twins import *
 from .interfuser import *
 from .pointpillar import *
 from .memfuser import *
+from .memfuser_client import *
 
 from .factory import create_model, split_model_name, safe_model_name
 from .helpers import load_checkpoint, resume_checkpoint, model_parameters
