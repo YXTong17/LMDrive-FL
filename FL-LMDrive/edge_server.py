@@ -81,7 +81,7 @@ if __name__ == "__main__":
         ServerModel_Input = (
             Client_to_Server()
         )  # 从客户端的Client_ContinueToForword_Server获得ServerModel_Input
-        from timm.models.memfuser_egde_server import memfuser_baseline_e1d3_edge_server
+        from timm.models.memfuser_edge_server import memfuser_baseline_e1d3_edge_server
 
         model = memfuser_baseline_e1d3_edge_server(
             num_features=ServerModel_Input["num_features"]

@@ -1,4 +1,4 @@
-name: drivegpt
+name: lmdrive-fl
 channels:
   - pytorch
   - https://pkg.sensetime.com/repository/conda-tsinghua-main

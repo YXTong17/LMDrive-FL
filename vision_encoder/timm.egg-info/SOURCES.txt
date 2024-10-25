@@ -74,7 +74,7 @@ timm/models/levit.py
 timm/models/memfuser copy.py
 timm/models/memfuser.py
 timm/models/memfuser_client.py
-timm/models/memfuser_egde_server.py
+timm/models/memfuser_edge_server.py
 timm/models/mlp_mixer.py
 timm/models/mobilenetv3.py
 timm/models/nasnet.py
