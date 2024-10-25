@@ -1,54 +1,44 @@
 #!/usr/bin/env python3
 import argparse
-import time
-import yaml
-import os
 import logging
+import os
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
-from render import render, render_waypoints
-from lavis.tasks import *
+
 import torch
 import torch.nn as nn
 import torchvision.utils
-from torch.nn.parallel import DistributedDataParallel as NativeDDP
-from lavis.datasets.data_utils import prepare_sample
-from tensorboardX import SummaryWriter
+import yaml
 from lavis.datasets.builders.carla_dataset_builder import CarlaDatasetBuilder
-from lavis.datasets.datasets.dataloader_utils import (
-    IterLoader,
-)
+from lavis.datasets.data_utils import prepare_sample
+from lavis.datasets.datasets.dataloader_utils import IterLoader
+from lavis.tasks import *
+from render import render, render_waypoints
+from tensorboardX import SummaryWriter
 
-
-
-from timm.data import (
-    # create_dataset,
-    # create_loader,
-    resolve_data_config,
-    Mixup,
-    FastCollateMixup,
-    AugMixDataset,
-)
 # from timm.data import create_carla_dataset, create_carla_loader
-from timm.data import  create_carla_loader
-from timm.models import (
-    create_model,
-    safe_model_name,
-    resume_checkpoint,
-    load_checkpoint,
-    convert_splitbn_model,
-    model_parameters,
-)
-from timm.utils import *
+from timm.data import AugMixDataset  # create_dataset,; create_loader,
+from timm.data import FastCollateMixup, Mixup, create_carla_loader, resolve_data_config
 from timm.loss import (
+    JsdCrossEntropy,
     LabelSmoothingCrossEntropy,
     SoftTargetCrossEntropy,
-    JsdCrossEntropy,
+)
+from timm.models import (
+    convert_splitbn_model,
+    create_model,
+    load_checkpoint,
+    model_parameters,
+    resume_checkpoint,
+    safe_model_name,
 )
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler
+from timm.utils import *
 from timm.utils import ApexScaler, NativeScaler
+from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
 try:
     from apex import amp
@@ -556,7 +546,7 @@ parser.add_argument(
     "--smoothing", type=float, default=0.0, help="Label smoothing (default: 0.0)"
 )
 parser.add_argument(
-    "--smoothed_l1", default=False, action='store_true', help="L1 smooth"
+    "--smoothed_l1", default=False, action="store_true", help="L1 smooth"
 )
 parser.add_argument(
     "--train-interpolation",
@@ -793,29 +783,40 @@ class WaypointL1Loss:
         loss = loss * torch.tensor(self.weights, device=output.device)
         return torch.mean(loss)
 
+
 class LAVLoss:
     def __init__(self):
-        self.prob_criterion = nn.BCEWithLogitsLoss(reduction='none')
-        self.loc_criterion = nn.L1Loss(reduction='none')
-        self.ori_criterion = nn.L1Loss(reduction='none')
-        self.box_criterion = nn.L1Loss(reduction='none')
-        self.spd_criterion = nn.L1Loss(reduction='none')
-        #self.loc_criterion = nn.SmoothL1Loss(reduction='none')
-        #self.ori_criterion = nn.SmoothL1Loss(reduction='none')
-        #self.box_criterion = nn.SmoothL1Loss(reduction='none')
-        #self.spd_criterion = nn.SmoothL1Loss(reduction='none')
+        self.prob_criterion = nn.BCEWithLogitsLoss(reduction="none")
+        self.loc_criterion = nn.L1Loss(reduction="none")
+        self.ori_criterion = nn.L1Loss(reduction="none")
+        self.box_criterion = nn.L1Loss(reduction="none")
+        self.spd_criterion = nn.L1Loss(reduction="none")
+        # self.loc_criterion = nn.SmoothL1Loss(reduction='none')
+        # self.ori_criterion = nn.SmoothL1Loss(reduction='none')
+        # self.box_criterion = nn.SmoothL1Loss(reduction='none')
+        # self.spd_criterion = nn.SmoothL1Loss(reduction='none')
 
     def __call__(self, output, target):
-        prob = target[:, : ,0:1]
+        prob = target[:, :, 0:1]
         prob_mean = prob.mean()
         prob_mean = torch.maximum(prob_mean, torch.ones_like(prob_mean) * 1e-7)
         prob_det = torch.sigmoid(output[:, :, 0] * (1 - 2 * target[:, :, 0]))
 
-        det_loss = (prob_det * self.prob_criterion(output[:, :, 0], target[:, :, 0])).mean() / prob_det.mean()
-        loc_loss = (prob * self.loc_criterion(output[:, :, 1:3], target[:, :, 1:3])).mean() / prob_mean
-        box_loss = (prob * self.box_criterion(output[:, :, 3:5], target[:, :, 3:5])).mean() / prob_mean
-        ori_loss = (prob * self.ori_criterion(output[:, :, 5:7], target[:, :, 5:7])).mean() / prob_mean
-        spd_loss = (prob * self.ori_criterion(output[:, :, 7:8], target[:, :, 7:8])).mean() / prob_mean
+        det_loss = (
+            prob_det * self.prob_criterion(output[:, :, 0], target[:, :, 0])
+        ).mean() / prob_det.mean()
+        loc_loss = (
+            prob * self.loc_criterion(output[:, :, 1:3], target[:, :, 1:3])
+        ).mean() / prob_mean
+        box_loss = (
+            prob * self.box_criterion(output[:, :, 3:5], target[:, :, 3:5])
+        ).mean() / prob_mean
+        ori_loss = (
+            prob * self.ori_criterion(output[:, :, 5:7], target[:, :, 5:7])
+        ).mean() / prob_mean
+        spd_loss = (
+            prob * self.ori_criterion(output[:, :, 7:8], target[:, :, 7:8])
+        ).mean() / prob_mean
 
         det_loss = 0.4 * det_loss + 0.2 * loc_loss + 0.2 * box_loss + 0.2 * ori_loss
         return det_loss, spd_loss
@@ -854,7 +855,7 @@ class MVTL1Loss:
         output_2 = output[target_1_mask][:][:, 7]
         target_2 = target[target_1_mask][:][:, 7]
         if target_2.numel() == 0:
-            loss_3 = target_2.sum() # torch.tensor([0.0]).cuda()
+            loss_3 = target_2.sum()  # torch.tensor([0.0]).cuda()
         else:
             loss_3 = self.loss(target_2, output_2)
         return 0.5 * loss_1 * self.weight + 0.5 * loss_2, loss_3
@@ -935,8 +936,6 @@ def main():
         freeze_num=args.freeze_num,
     )
 
-
-
     data_config = resolve_data_config(
         vars(args), model=model, verbose=args.local_rank == 0
     )
@@ -957,28 +956,19 @@ def main():
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
 
-
-
     if args.torchscript:
         assert not use_amp == "apex", "Cannot use APEX AMP with torchscripted model"
         assert not args.sync_bn, "Cannot use SyncBatchNorm with torchscripted model"
         model = torch.jit.script(model)
 
-    linear_scaled_lr = (
-        args.lr * args.batch_size * 1 / 512.0
-    )
+    linear_scaled_lr = args.lr * args.batch_size * 1 / 512.0
     args.lr = linear_scaled_lr
     if args.with_backbone_lr:
         if args.local_rank == 0:
             _logger.info(
                 "CNN backbone and transformer blocks using different learning rates!"
             )
-        backbone_linear_scaled_lr = (
-            args.backbone_lr
-            * args.batch_size
-            * 1
-            / 512.0
-        )
+        backbone_linear_scaled_lr = args.backbone_lr * args.batch_size * 1 / 512.0
         backbone_weights = []
         other_weights = []
         for name, weight in model.named_parameters():
@@ -1041,8 +1031,6 @@ def main():
         if args.resume:
             load_checkpoint(model_ema.module, args.resume, use_ema=True)
 
-   
-
     # setup learning rate schedule and starting epoch
     lr_scheduler, num_epochs = create_scheduler(args, optimizer)
     start_epoch = 0
@@ -1063,35 +1051,39 @@ def main():
         collate_fn = None
         mixup_fn = None
         from argparse import Namespace
+
         from lavis.common.config import Config
         from lavis.common.registry import registry
         from lavis.runners.runner_base import RunnerBase
+
         # 创建Namespace 对象，并设置一些属性
-        args_data = Namespace(cfg_path='/home/tyx/yjl/LMDrive-FL/LAVIS/lavis/projects/lmdrive/notice_llava15_visual_encoder_r50_seq40.yaml', options=None)
-        
+        args_data = Namespace(
+            cfg_path="/home/tyx/yjl/LMDrive-FL/LAVIS/lavis/projects/lmdrive/notice_llava15_visual_encoder_r50_seq40.yaml",
+            options=None,
+        )
+
         cfg = Config(args_data)
 
-
     from lavis.common.utils import now
+
     job_id = now()
     import lavis.tasks as tasks
+
     task = tasks.setup_task(cfg)
     datasets = task.build_datasets(cfg)
+
     def get_runner_class(cfg):
         runner_cls = registry.get_runner_class(cfg.run_cfg.get("runner", "runner_base"))
         return runner_cls
+
     runner = get_runner_class(cfg)(
         cfg=cfg, job_id=job_id, task=task, model=model, datasets=datasets
     )
 
-
-
-    
     loader_train = runner.dataloaders["train"]
     print(type(loader_train))
-    loader_eval =  runner.dataloaders['val']
+    loader_eval = runner.dataloaders["val"]
     print(type(loader_eval))
-
 
     # setup loss function
     if args.smoothing > 0:
@@ -1105,14 +1097,14 @@ def main():
         l1_loss = torch.nn.L1Loss
 
     train_loss_fns = {
-        #"traffic": MVTL1Loss(1.0, l1_loss=l1_loss),
+        # "traffic": MVTL1Loss(1.0, l1_loss=l1_loss),
         "traffic": LAVLoss(),
         "waypoints": torch.nn.L1Loss(),
         "cls": cls_loss,
         "stop_cls": cls_loss,
     }
     validate_loss_fns = {
-        #"traffic": MVTL1Loss(1.0, l1_loss=l1_loss),
+        # "traffic": MVTL1Loss(1.0, l1_loss=l1_loss),
         "traffic": LAVLoss(),
         "waypoints": torch.nn.L1Loss(),
         "cls": cls_loss,
@@ -1181,8 +1173,6 @@ def main():
                 model_ema=model_ema,
                 mixup_fn=mixup_fn,
             )
-
-           
 
             eval_metrics = validate(
                 epoch,
@@ -1263,7 +1253,7 @@ def train_one_epoch(
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
     losses_waypoints = AverageMeter()
-    losses_waypoints_llm = AverageMeter()#添加llm的waypoints losses记录
+    losses_waypoints_llm = AverageMeter()  # 添加llm的waypoints losses记录
     losses_traffic = AverageMeter()
     losses_velocity = AverageMeter()
     losses_traffic_light_state = AverageMeter()
@@ -1272,28 +1262,26 @@ def train_one_epoch(
     model.train()
     end = time.time()
 
-
-
     #####
-    
+
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
 
     for i in range(len(loader)):
         # if i % 100 == 0:
         #     print("当前batch index ：",i)
-        last_batch = i  == last_idx
+        last_batch = i == last_idx
         samples = next(loader)
 
         if samples == None:
             break
         samples = prepare_sample(samples, cuda_enabled=True)
-        batch_size = samples['rgb_front'].size(0)
-        #将drive model里面的处理采样数据格式的代码转移进来
+        batch_size = samples["rgb_front"].size(0)
+        # 将drive model里面的处理采样数据格式的代码转移进来
 
-        target_visionencoder = samples['target']
+        target_visionencoder = samples["target"]
         # print(target_visionencoder)
-        
+
         if True:
             with amp_autocast():
                 input = samples
@@ -1301,18 +1289,28 @@ def train_one_epoch(
             target = target_visionencoder
             # print(target)
             # print(target[0].size())
-            for t in  range(len(target)):
-                
-                if t in [1,4]:
-                    target[t] = torch.reshape( target[t], ( target[t].size(1)*target[t].size(0),  target[t].size(2),target[t].size(3)))
+            for t in range(len(target)):
+
+                if t in [1, 4]:
+                    target[t] = torch.reshape(
+                        target[t],
+                        (
+                            target[t].size(1) * target[t].size(0),
+                            target[t].size(2),
+                            target[t].size(3),
+                        ),
+                    )
                 elif t in [2]:
-                    target[t] = torch.reshape( target[t], (target[t].size(1)*target[t].size(0),  target[t].size(2)))
-                elif t in [3,6]:
-                    target[t] = torch.reshape(target[t], (target[t].size(1)*target[t].size(0),))
+                    target[t] = torch.reshape(
+                        target[t],
+                        (target[t].size(1) * target[t].size(0), target[t].size(2)),
+                    )
+                elif t in [3, 6]:
+                    target[t] = torch.reshape(
+                        target[t], (target[t].size(1) * target[t].size(0),)
+                    )
 
-
-
-            #*
+            # *
             """ 这里调用服务端的函数得到前向传播的来自大模型的waypoints_loss
             需要传入server model的数据如下:
 
@@ -1325,39 +1323,49 @@ def train_one_epoch(
             
             
             """
-            ServerModel_Input = {'text_input': input['text_input'], 'valid_frames': input['valid_frames'],'local_future_waypoints': input['local_future_waypoints'],
-                                 'text_before_img': input['text_before_img'],'text_after_img': input['text_after_img'],
-                                 'notice_frame_id': input['notice_frame_id'],
-                                 'target_point': input['target_point'],
-                                 'image_embeds': output[5],
-                                 'device': output[6][0],'bs_llm': output[6][1],'t': output[6][2],'num_features':model.num_features}
+            ServerModel_Input = {
+                "text_input": input["text_input"],
+                "valid_frames": input["valid_frames"],
+                "local_future_waypoints": input["local_future_waypoints"],
+                "text_before_img": input["text_before_img"],
+                "text_after_img": input["text_after_img"],
+                "notice_frame_id": input["notice_frame_id"],
+                "target_point": input["target_point"],
+                "image_embeds": output[5],
+                "device": output[6][0],
+                "bs_llm": output[6][1],
+                "t": output[6][2],
+                "num_features": model.num_features,
+            }
+
             def Client_ContinueToForword_Server(ServerModel_Input):
                 Client_to_Server(ServerModel_Input)
                 return Server_to_Client()
-            ServerOutput =  Client_ContinueToForword_Server(ServerModel_Input) #客户端传递x给服务端，继续前向传播
+
+            ServerOutput = Client_ContinueToForword_Server(
+                ServerModel_Input
+            )  # 客户端传递x给服务端，继续前向传播
             # 获得返回结果ServerOutput
             predicted_waypoints = ServerOutput
-            gt_waypoints = build_gt_waypoints(input['local_future_waypoints'], input['valid_frames'])
+            gt_waypoints = build_gt_waypoints(
+                input["local_future_waypoints"], input["valid_frames"]
+            )
             waypoints_llm_loss = torch.nn.L1Loss()
-            waypoints_loss_llm = waypoints_llm_loss(predicted_waypoints,gt_waypoints)
+            waypoints_loss_llm = waypoints_llm_loss(predicted_waypoints, gt_waypoints)
 
-            #梯度 = 计算梯度函数(predicted_waypoints , waypoints_loss_llm)
-            #梯度传输函数(梯度)
-            #梯度 = 得到服务端的梯度
-            #客户端反向传播()
-        
-            #*
+            # 梯度 = 计算梯度函数(predicted_waypoints , waypoints_loss_llm)
+            # 梯度传输函数(梯度)
+            # 梯度 = 得到服务端的梯度
+            # 客户端反向传播()
+
+            # *
             loss_traffic, loss_velocity = loss_fns["traffic"](output[0], target[4])
-            
+
             loss_waypoints = loss_fns["waypoints"](output[1], target[1])
             on_road_mask = target[2] < 0.5
-            
 
-            loss_traffic_light_state = loss_fns["cls"](
-                output[2], target[3]
-            )
+            loss_traffic_light_state = loss_fns["cls"](output[2], target[3])
             loss_stop_sign = loss_fns["stop_cls"](output[3], target[6])
-
 
             loss = (
                 loss_traffic * 0.5
@@ -1371,7 +1379,7 @@ def train_one_epoch(
         if not args.distributed:
             losses_traffic.update(loss_traffic.item(), batch_size)
             losses_waypoints.update(loss_waypoints.item(), batch_size)
-            losses_waypoints_llm.update(waypoints_loss_llm,batch_size)
+            losses_waypoints_llm.update(waypoints_loss_llm, batch_size)
 
             losses_m.update(loss.item(), batch_size)
 
@@ -1394,7 +1402,7 @@ def train_one_epoch(
 
             loss.backward(create_graph=second_order)
             if i % 100 == 0 and i != 0:
-                print("当前反向传播时间：",time.time()-back_before)
+                print("当前反向传播时间：", time.time() - back_before)
 
             if args.clip_grad is not None:
                 dispatch_clip_grad(
@@ -1464,7 +1472,9 @@ def train_one_epoch(
 
                     # Add Image
                     writer.add_image(
-                        "train/front_view", retransform(input["rgb_front"][0]), num_updates
+                        "train/front_view",
+                        retransform(input["rgb_front"][0]),
+                        num_updates,
                     )
                     writer.add_image(
                         "train/left_view",
@@ -1504,10 +1514,10 @@ def train_one_epoch(
                         ).view(1, 250, 250),
                         num_updates,
                     )
-                    #input["lidar"][0] = input["lidar"][0] / torch.max(input["lidar"][0])
-                    #writer.add_image(
+                    # input["lidar"][0] = input["lidar"][0] / torch.max(input["lidar"][0])
+                    # writer.add_image(
                     #    "train/lidar", torch.clip(input["lidar"][0], 0, 1), num_updates
-                    #)
+                    # )
                     writer.add_image(
                         "train/gt_traffic",
                         torch.clip(target[4][0], 0, 1).view(1, 50, 50, 8)[:, :, :, 0],
@@ -1608,47 +1618,65 @@ def validate(
     traffic_light_state_errorm = AverageMeter()
     stop_sign_errorm = AverageMeter()
 
-    losses_waypoints_llm = AverageMeter()#添加llm的waypoints losses记录
-    
-    loader = IterLoader(loader, use_distributed=False)#将loader改成train的形式
+    losses_waypoints_llm = AverageMeter()  # 添加llm的waypoints losses记录
+
+    loader = IterLoader(loader, use_distributed=False)  # 将loader改成train的形式
 
     model.eval()
 
     end = time.time()
     last_idx = len(loader) - 1
     with torch.no_grad():
-        #为了和上面一致，我把所有的batch_idx都用的i
+        # 为了和上面一致，我把所有的batch_idx都用的i
         for i in range(len(loader)):
             # if i % 100 == 0:
             #     print("当前batch index ：",i)
-            last_batch = i  == last_idx
+            last_batch = i == last_idx
             samples = next(loader)
 
             if samples == None:
                 break
             samples = prepare_sample(samples, cuda_enabled=True)
-            batch_size = samples['rgb_front'].size(0)
-            target_visionencoder = samples['target']
-            
+            batch_size = samples["rgb_front"].size(0)
+            target_visionencoder = samples["target"]
 
             with amp_autocast():
                 input = samples
                 output = model(input)
             target = target_visionencoder
             # print(target)
-            
-            for t in  range(len(target)):
-                if t in [1,4]:
-                    target[t] = torch.reshape( target[t], ( target[t].size(1)*target[t].size(0),  target[t].size(2),target[t].size(3)))
+
+            for t in range(len(target)):
+                if t in [1, 4]:
+                    target[t] = torch.reshape(
+                        target[t],
+                        (
+                            target[t].size(1) * target[t].size(0),
+                            target[t].size(2),
+                            target[t].size(3),
+                        ),
+                    )
                 elif t in [2]:
-                    target[t] = torch.reshape( target[t], (target[t].size(1)*target[t].size(0),  target[t].size(2)))
-                elif t in [3,6]:
-                    target[t] = torch.reshape(target[t], (target[t].size(1)*target[t].size(0),))
-                elif t in [0,5]:
-                    target[t] = torch.reshape( target[t], ( target[t].size(1),target[t].size(0),  target[t].size(2),target[t].size(3)))
+                    target[t] = torch.reshape(
+                        target[t],
+                        (target[t].size(1) * target[t].size(0), target[t].size(2)),
+                    )
+                elif t in [3, 6]:
+                    target[t] = torch.reshape(
+                        target[t], (target[t].size(1) * target[t].size(0),)
+                    )
+                elif t in [0, 5]:
+                    target[t] = torch.reshape(
+                        target[t],
+                        (
+                            target[t].size(1),
+                            target[t].size(0),
+                            target[t].size(2),
+                            target[t].size(3),
+                        ),
+                    )
 
-
-                        #*
+                    # *
             """ 这里调用服务端的函数得到前向传播的来自大模型的waypoints_loss
             需要传入server model的数据如下:
 
@@ -1661,28 +1689,42 @@ def validate(
             
             
             """
-            ServerModel_Input = {'text_input': input['text_input'], 'valid_frames': input['valid_frames'],'local_future_waypoints': input['local_future_waypoints'],
-                                 'text_before_img': input['text_before_img'],'text_after_img': input['text_after_img'],
-                                 'notice_frame_id': input['notice_frame_id'],
-                                 'target_point': input['target_point'],
-                                 'image_embeds': output[5],
-                                 'device': output[6][0],'bs_llm': output[6][1],'t': output[6][2],'num_features':model.num_features}
+            ServerModel_Input = {
+                "text_input": input["text_input"],
+                "valid_frames": input["valid_frames"],
+                "local_future_waypoints": input["local_future_waypoints"],
+                "text_before_img": input["text_before_img"],
+                "text_after_img": input["text_after_img"],
+                "notice_frame_id": input["notice_frame_id"],
+                "target_point": input["target_point"],
+                "image_embeds": output[5],
+                "device": output[6][0],
+                "bs_llm": output[6][1],
+                "t": output[6][2],
+                "num_features": model.num_features,
+            }
+
             def Client_ContinueToForword_Server(ServerModel_Input):
                 Client_to_Server(ServerModel_Input)
                 return Server_to_Client()
-            ServerOutput =  Client_ContinueToForword_Server(ServerModel_Input) #客户端传递x给服务端，继续前向传播
+
+            ServerOutput = Client_ContinueToForword_Server(
+                ServerModel_Input
+            )  # 客户端传递x给服务端，继续前向传播
             # 获得返回结果ServerOutput
             predicted_waypoints = ServerOutput
-            gt_waypoints = build_gt_waypoints(input['local_future_waypoints'], input['valid_frames'])
+            gt_waypoints = build_gt_waypoints(
+                input["local_future_waypoints"], input["valid_frames"]
+            )
             waypoints_llm_loss = torch.nn.L1Loss()
-            waypoints_loss_llm = waypoints_llm_loss(predicted_waypoints,gt_waypoints)
+            waypoints_loss_llm = waypoints_llm_loss(predicted_waypoints, gt_waypoints)
 
-            #梯度 = 计算梯度函数(predicted_waypoints , waypoints_loss_llm)
-            #梯度传输函数(梯度)
-            #梯度 = 得到服务端的梯度
-            #客户端反向传播()
-        
-            #*
+            # 梯度 = 计算梯度函数(predicted_waypoints , waypoints_loss_llm)
+            # 梯度传输函数(梯度)
+            # 梯度 = 得到服务端的梯度
+            # 客户端反向传播()
+
+            # *
             reduce_factor = args.tta
             if reduce_factor > 1:
                 output = output.unfold(0, reduce_factor, reduce_factor).mean(dim=2)
@@ -1702,9 +1744,7 @@ def validate(
                 + waypoints_loss_llm * 0.2
             )
 
-            traffic_light_state_error = accuracy(
-                output[2], target[3]
-            )[0]
+            traffic_light_state_error = accuracy(output[2], target[3])[0]
             stop_sign_error = accuracy(output[3], target[6])[0]
 
             if args.distributed:
@@ -1732,10 +1772,10 @@ def validate(
                 reduced_loss = loss.data
 
             torch.cuda.synchronize()
-            if not args.distributed:#补充
+            if not args.distributed:  # 补充
                 losses_traffic.update(loss_traffic.item(), batch_size)
                 losses_waypoints.update(loss_waypoints.item(), batch_size)
-                losses_waypoints_llm.update(output[5],batch_size)
+                losses_waypoints_llm.update(output[5], batch_size)
                 losses_m.update(loss.item(), batch_size)
 
             if args.distributed:
@@ -1756,9 +1796,7 @@ def validate(
 
             batch_time_m.update(time.time() - end)
             end = time.time()
-            if args.local_rank == 0 and (
-                last_batch or i % args.log_interval == 0
-            ):
+            if args.local_rank == 0 and (last_batch or i % args.log_interval == 0):
                 log_name = "Test" + log_suffix
                 _logger.info(
                     "{0}: [{1:>4d}/{2}]  "
@@ -1874,27 +1912,28 @@ def validate(
 
     return metrics
 
-import socket
+
 import json
 import pickle
+import socket
+
+
 def Server_to_Client():
-    host,port = '0.0.0.0',20841
+    host, port = "0.0.0.0", 20841
     Receiver_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     Receiver_socket.bind((host, port))
     Receiver_socket.listen(1)
     print(f"Server listening on {host}:{port}")
 
-
     Sent_socket, addr = Receiver_socket.accept()
     print(f"Connection from {addr} has been established.")
-
 
     # 接收数据长度
     data_length = Sent_socket.recv(1024)
     data_length = int(data_length)
-    
+
     # 初始化接收的数据缓冲区
-    received_data = b''
+    received_data = b""
 
     # 循环接收数据直到达到指定长度
     while len(received_data) < data_length:
@@ -1909,32 +1948,35 @@ def Server_to_Client():
     Receiver_socket.close()
     return received_dict
 
-    
 
 def Client_to_Server(ServerOutput):
     Sent_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     import time
+
     time.sleep(10)
-    Sent_socket.connect(('127.0.0.1', 20840))
+    Sent_socket.connect(("127.0.0.1", 20840))
     # 使用pickle序列化字典
     serialized_data = pickle.dumps(ServerOutput)
 
     # 发送数据长度
-    Sent_socket.sendall(str(len(serialized_data)).encode('utf-8'))
-    print("已经发送数据长度,",len(serialized_data))
+    Sent_socket.sendall(str(len(serialized_data)).encode("utf-8"))
+    print("已经发送数据长度,", len(serialized_data))
     # 发送数据
     Sent_socket.sendall(serialized_data)
 
     # 接收服务端的响应
     response = Sent_socket.recv(1024)
 
-
     Sent_socket.close()
-def build_gt_waypoints( waypoints, valid_frames):
-        gt_waypoints = []
-        for i in range(waypoints.size(0)):
-            gt_waypoints.append(waypoints[i, :valid_frames[i]])
-        gt_waypoints = torch.cat(gt_waypoints, dim=0)
-        return gt_waypoints
+
+
+def build_gt_waypoints(waypoints, valid_frames):
+    gt_waypoints = []
+    for i in range(waypoints.size(0)):
+        gt_waypoints.append(waypoints[i, : valid_frames[i]])
+    gt_waypoints = torch.cat(gt_waypoints, dim=0)
+    return gt_waypoints
+
+
 if __name__ == "__main__":
     main()

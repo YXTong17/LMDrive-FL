@@ -15,7 +15,7 @@ GPU_NUM=1
 DATASET_ROOT='/home/tyx/yjl/LMDrive/vision_encoder/'
 
 
-python3   FL-LMDrive/client.py  "/home/tyx/yjl/LMDrive-FL/vision_encoder/"  --dataset carla --train-towns 1 --val-towns 1 \
+python3 client.py "/home/tyx/yjl/LMDrive-FL/vision_encoder/" --dataset carla --train-towns 1 --val-towns 1 \
     --train-weathers 0 1 2 4 5 6 7 8 9 10 11 14 15 16 17 18 19 --val-weathers 3 12 13 20 \
     --model memfuser_baseline_e1d3_client --sched cosine --epochs 1 --warmup-epochs 1 --lr 0.00075 --batch-size 20 -j 1 \
     --no-prefetcher --eval-metric l1_error \
@@ -26,4 +26,3 @@ python3   FL-LMDrive/client.py  "/home/tyx/yjl/LMDrive-FL/vision_encoder/"  --da
     --smoothed_l1 \
     --experiment memfuser_e1d3 \
     --pretrained 
-    
