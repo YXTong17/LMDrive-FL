@@ -18,6 +18,7 @@ vision_encoder/data_temp
 
 # model
 model_temp
+vision_encoder/sensor_pretrain.pth.tar.r50
 
 # output
 LAVIS/lavis/output
