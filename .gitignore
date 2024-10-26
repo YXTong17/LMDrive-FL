@@ -23,6 +23,7 @@ vision_encoder/sensor_pretrain.pth.tar.r50
 # output
 LAVIS/lavis/output
 vision_encoder/output
+FL-LMDrive/output
 # */output
 
 
