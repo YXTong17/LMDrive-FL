@@ -13,7 +13,7 @@ from lavis.common.dist_utils import is_dist_avail_and_initialized, is_main_proce
 
 from lavis.common.registry import registry
 from lavis.datasets.builders.base_dataset_builder import BaseDatasetBuilder
-from lavis.datasets.datasets.carla_dataset_llm import CarlaVoiceDataset
+from lavis.datasets.datasets.carla_dataset_fl import CarlaFLDataset
 
 @registry.register_builder("carla_voice")
 class CarlaDatasetBuilder(BaseDatasetBuilder):
@@ -55,7 +55,7 @@ class CarlaDatasetBuilder(BaseDatasetBuilder):
             enable_notice = ann_info.get(split).enable_notice
 
             # create datasets
-            datasets[split] = CarlaVoiceDataset(
+            datasets[split] = CarlaFLDataset(
                 dataset_root=ann_path,
                 towns=towns,
                 weathers=weathers,
