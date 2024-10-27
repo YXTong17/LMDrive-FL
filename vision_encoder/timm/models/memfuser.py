@@ -4,20 +4,33 @@ import logging
 from typing import Optional, List
 from collections import OrderedDict
 from functools import partial
-
+from peft import LoraConfig, get_peft_model
 import numpy
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
-
 from .registry import register_model
 from .resnet import resnet26d, resnet50d, resnet18d, resnet26, resnet50, resnet101d, resnet34d
 from .layers import StdConv2dSame, StdConv2d, to_2tuple
 from .pointpillar import PointPillarNet, ConvBackbone
 
 _logger = logging.getLogger(__name__)
+
+#迁移LayerNorm
+class LayerNorm(nn.LayerNorm):
+    """Subclass torch's LayerNorm to handle fp16."""
+
+    def forward(self, x: torch.Tensor):
+        orig_type = x.dtype
+        ret = super().forward(x.type(torch.float32))
+        return ret.type(orig_type)
+
+
+
+
+
 
 
 class HybridEmbed(nn.Module):
@@ -98,7 +111,9 @@ class PositionEmbeddingSine(nn.Module):
             x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
 
         dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
-        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+        # dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+        dim_t = self.temperature ** (2 * torch.div(dim_t, 2, rounding_mode='floor') / self.num_pos_feats)
+
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
@@ -643,6 +658,99 @@ class Memfuser(nn.Module):
         )
         self.velocity_fc = nn.Linear(1, embed_dim)
         self.reset_parameters()
+        from lavis.models.blip2_models.blip2 import Blip2Base
+        from transformers import LlamaTokenizer
+        from lavis.models.blip2_models.modeling_llama import LlamaForCausalLM
+        from lavis.models.blip2_models.modeling_opt import OPTForCausalLM, OPTConfig
+        from transformers import AutoTokenizer
+        from transformers import AutoModelForCausalLM
+        #将模型Drive Model的LLM Init部分迁移过来
+        self.tokenizer = Blip2Base.init_tokenizer(truncation_side="left")
+        max_txt_len=128
+        #这些布尔变量，暂时全是True
+        self.has_qformer = True
+        self.has_gru_decoder = False
+        self.has_lora = True
+        self.use_extra_prompt = False
+        self.use_notice_prompt = True
+        #需要模型路径的地址变量
+        llm_model = "/home/tyx/yjl/LLamaTest/model_saved"
+
+
+        self.split_section_num_for_visual_encoder = 1 #save gpu memory       
+        self.ln_vision = LayerNorm(self.num_features)
+        if 'opt' in llm_model:
+            self.llm_tokenizer = AutoTokenizer.from_pretrained(llm_model, use_fast=False, truncation_side='left')
+            self.llm_model = OPTForCausalLM.from_pretrained(llm_model, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+        else:
+            self.llm_tokenizer = LlamaTokenizer.from_pretrained(llm_model, use_fast=False, truncation_side="left")
+            self.llm_model = LlamaForCausalLM.from_pretrained(llm_model, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+
+
+        self.llm_tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        self.llm_tokenizer.add_special_tokens({'bos_token': '</s>'})
+        self.llm_tokenizer.add_special_tokens({'eos_token': '</s>'})
+        self.llm_tokenizer.add_special_tokens({'unk_token': '</s>'})
+
+        self.llm_model.resize_token_embeddings(len(self.llm_tokenizer))
+
+        if self.has_gru_decoder:
+            self.waypoints_fc = nn.Sequential(
+                        nn.Linear(self.llm_model.config.hidden_size, self.llm_model.config.hidden_size),
+                        nn.ReLU(),
+                        nn.Linear(self.llm_model.config.hidden_size, 64)
+            )
+            self.waypoints_predictor = nn.GRUCell(input_size=2, hidden_size=64)
+            self.waypoints_output = nn.Linear(64, 2)
+        else:
+            self.waypoints_predictor = nn.Sequential(
+                            nn.Linear(self.llm_model.config.hidden_size, self.llm_model.config.hidden_size),
+                            nn.ReLU(),
+                            nn.Linear(self.llm_model.config.hidden_size, 10)
+            )
+        self.end_predictor = nn.Sequential(
+            nn.Linear(self.llm_model.config.hidden_size, self.llm_model.config.hidden_size),
+            nn.ReLU(),
+            nn.Linear(self.llm_model.config.hidden_size, 2)
+        )
+
+        if self.has_qformer:
+            print('Loading Q-Former')
+            self.Qformer, self.query_tokens = Blip2Base.init_Qformer(
+                4, self.num_features
+            )
+            self.Qformer.resize_token_embeddings(len(self.llm_tokenizer))
+            self.Qformer.cls = None
+
+
+        if self.has_lora:
+            loraconfig = LoraConfig(
+                r=16,
+                lora_alpha=32,
+                target_modules=["q_proj","v_proj"],
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM"
+            )
+            self.llm_model = get_peft_model(self.llm_model, loraconfig)
+            self.llm_model.print_trainable_parameters()
+        else:
+            for name, param in self.llm_model.named_parameters():
+                param.requires_grad = False
+
+        self.llm_proj = nn.Linear(
+            self.Qformer.config.hidden_size, self.llm_model.config.hidden_size
+        )
+
+        self.max_txt_len = max_txt_len
+
+        self.waypoints_loss = torch.nn.L1Loss()
+        self.end_loss = torch.nn.CrossEntropyLoss()
+
+
+
+
+
 
     def reset_parameters(self):
         nn.init.uniform_(self.global_embed)
@@ -809,6 +917,20 @@ class Memfuser(nn.Module):
         return features, lidar_token
 
     def forward(self, x):
+        self.return_feature = False #取消直接返回的推理模型
+        front_image = x["rgb_front"]
+        #添加Drive Model部分代码
+        device = front_image.device
+        # print("当前的维度：",front_image.size())
+        bs_llm = front_image.size(0)
+        t  = front_image.size(1)
+        temp = dict()
+        for key in ['rgb_front', 'rgb_left', 'rgb_right', 'rgb_rear', 'rgb_center', 'lidar', 'num_points', 'velocity', 
+                    'command','measurements',  'heatmap_mask','target_point']:
+            shapz = x[key].size()
+            temp[key] = x[key]
+            x[key] = x[key].view(bs_llm*t, *shapz[2:])
+            
         front_image = x["rgb_front"]
         left_image = x["rgb_left"]
         right_image = x["rgb_right"]
@@ -816,6 +938,8 @@ class Memfuser(nn.Module):
         front_center_image = x["rgb_center"]
         lidar = x["lidar"]
         num_points = x['num_points']
+        ###
+        
         if not self.return_feature:
             velocity = x['velocity'].view(1, -1, 1)
             target_point = x["target_point"]
@@ -860,11 +984,7 @@ class Memfuser(nn.Module):
         traffic_light_state_feature = hs[:, 2500]
         stop_sign_feature = hs[:, 2500]
         waypoints_feature = hs[:, 2501:2506]
-        if self.return_feature:
-            traffic_feature = traffic_feature.reshape(bs, 50, 50, -1).permute(0, 3, 1, 2)
-            traffic_feature = F.adaptive_avg_pool2d(traffic_feature, (10, 10)).view(bs, -1, 100).permute(0, 2, 1)
-            return torch.cat([traffic_feature, traffic_light_state_feature.view(bs, 1, -1), waypoints_feature], 1)
-            return waypoints_feature[:, :5]
+
 
         if self.waypoints_pred_head == "gru":
             waypoints = self.waypoints_generator(waypoints_feature, target_point)
@@ -878,8 +998,287 @@ class Memfuser(nn.Module):
         velocity = velocity.repeat(1, 2500, 32)
         traffic_feature_with_vel = torch.cat([traffic_feature, velocity], dim=2)
         traffic = self.traffic_pred_head(traffic_feature_with_vel)
-        return traffic, waypoints, traffic_light_state, stop_sign, traffic_feature
 
+        # with Blip2Base.maybe_autocast():#如果在GPU上，使用混合精度
+        #添加Drive Model部分代码
+        traffic_feature = traffic_feature.reshape(bs, 50, 50, -1).permute(0, 3, 1, 2)
+        traffic_feature = F.adaptive_avg_pool2d(traffic_feature, (10, 10)).view(bs, -1, 100).permute(0, 2, 1)
+        image_embeds = torch.cat([traffic_feature, traffic_light_state_feature.view(bs, 1, -1), waypoints_feature], 1)
+            # return waypoints_feature[:, :5]
+        
+        image_embeds = self.ln_vision(image_embeds)
+        if self.has_qformer:
+            query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+            text_Qformer = self.llm_tokenizer(
+                [i for i in x['text_input'] for _ in range(t)],
+                padding='longest',
+                truncation=True,
+                max_length=self.max_txt_len,
+                return_tensors="pt",
+            ).to(device)
+
+            query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(device)
+            
+            Qformer_atts = torch.cat([query_atts, text_Qformer.attention_mask],dim=1)
+            image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(device)
+
+            query_output = self.Qformer.bert(
+                text_Qformer.input_ids,
+                attention_mask=Qformer_atts,
+                query_embeds=query_tokens,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_atts,
+                return_dict=True,
+            )
+
+        image_embeds = self.llm_proj(query_output.last_hidden_state[:,:query_tokens.size(1),:])
+        # print("当前的bs大小：",bs_llm,"当前的t",t)
+        image_embeds = image_embeds.view(bs_llm, t, *image_embeds.size()[1:])
+
+        if self.use_extra_prompt:
+            text_before_img = x['text_before_img']
+            text_after_img = x['text_after_img']
+            image_embeds, image_atts, end_flag_pos_list = self.prompt_wrap(image_embeds, text_before_img, text_after_img, x['valid_frames'])
+        else:
+            image_atts = None
+            end_flag_pos_list = []
+            n_length = image_embeds.size(2) # token number for each frame
+            for i in range(bs_llm):
+                end_flag_pos_list.append([n_length*(j+1)-1 for j in range(x['valid_frames'][i])])
+
+        self.llm_tokenizer.padding_side = "right"
+        self.llm_tokenizer.truncation_side = 'left'
+        text_input_tokens = self.llm_tokenizer(
+            x['text_input'],
+            return_tensors="pt",
+            padding="longest",
+            truncation=True,
+            max_length=self.max_txt_len,
+        ).to(device)
+        with torch.no_grad():#冻结大模型，不知道好使不好使
+            inputs_embeds = self.llm_model.get_input_embeddings()(text_input_tokens.input_ids)
+            # inputs_embeds shape: (batch_size, sequence_length, hidden_size)
+
+            if self.use_notice_prompt:
+                llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index = self.concat_text_image_input_with_notice(inputs_embeds, text_input_tokens.attention_mask,
+                                                                                                                    image_embeds, x['valid_frames'], end_flag_pos_list,
+                                                                                                                    x['notice_frame_id'], x['notice_text'], image_atts)
+            else:
+                llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index = self.concat_text_image_input(inputs_embeds, text_input_tokens.attention_mask,
+                                                                                                                    image_embeds, x['valid_frames'], end_flag_pos_list, image_atts)
+            wp_target_index = torch.tensor(wp_target_index, device=device).long()
+            from torch.cuda.amp import autocast
+            with autocast():
+                hidden_states = self.llm_model(
+                        inputs_embeds=llm_inputs,
+                        attention_mask=llm_attention_mask,
+                        return_dict=False,
+                    )
+        # predicted_waypoints: bs, seq_len, 10
+        if self.has_gru_decoder:
+            # print(temp['target_point'].size())
+            # print(x['target_point'].size())
+            x['target_point'] = temp['target_point']#还原targets_point维度
+            
+
+            output_wp = []
+            _, n_tokens, _ =hidden_states.size()
+            x = torch.zeros(size=(bs_llm*n_tokens, 2), dtype=hidden_states.dtype).to(device)
+            target_point = x['target_point'].view(bs_llm, -1, 2).to(device)
+
+            target_point_list = []
+            for i in range(bs_llm):
+                target_point_list.append(target_point[i, :x['valid_frames'][i], :])
+            target_point = torch.cat(target_point_list, 0)
+
+
+            target_point_zeros = torch.zeros(size=(bs_llm, n_tokens, 2), dtype=hidden_states.dtype).to(device)
+            target_point_zeros[wp_target_index[:,0], wp_target_index[:, 1]] = target_point.to(hidden_states.dtype)
+            target_point_zeros = target_point_zeros.view(bs_llm*n_tokens, 2)
+            target_point = target_point_zeros
+
+            waypoints_feature = self.waypoints_fc(hidden_states.reshape(-1, self.llm_model.config.hidden_size))
+            for _ in range(5):
+                x_in = x# + target_point
+                waypoints_feature = self.waypoints_predictor(x_in, waypoints_feature)
+                dx = self.waypoints_output(waypoints_feature)
+                x = dx + x
+                output_wp.append(x)
+            predicted_waypoints = torch.cat(output_wp, dim=1)
+            predicted_waypoints = predicted_waypoints.view(bs_llm, n_tokens, 10)
+
+        else:
+            predicted_waypoints = self.waypoints_predictor(hidden_states)
+            # predicted_waypoints: N * 10
+        predicted_waypoints = predicted_waypoints[wp_target_index[:,0], wp_target_index[:, 1]]
+        predicted_end_prob = self.end_predictor(hidden_states)
+        predicted_end_prob = predicted_end_prob[wp_target_index[:,0], wp_target_index[:, 1]]
+
+
+        gt_waypoints = self.build_gt_waypoints(x['local_future_waypoints'], x['valid_frames'])
+        waypoints_loss = self.waypoints_loss(predicted_waypoints, gt_waypoints)
+
+
+
+
+
+
+        return traffic, waypoints, traffic_light_state, stop_sign, traffic_feature,waypoints_loss
+    def concat_text_image_input(self, input_embeds, input_atts, image_embeds, image_nums, end_flag_pos_list, image_atts=None):
+        '''
+        attention_mask:
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+        '''
+        input_part_targets_len = []
+        llm_inputs = []
+        llm_attention_mask = []
+        wp_target_index = []
+        bs = image_embeds.size()[0]
+        for i in range(bs):
+            this_input_ones = input_atts[i].sum()
+            input_part_targets_len.append(this_input_ones)
+            if image_atts is None:
+                bs, t, n, dim = image_embeds.size()
+                llm_inputs.append(
+                    torch.cat([
+                        input_embeds[i][:this_input_ones],
+                        image_embeds[i].view(t*n, -1),
+                        input_embeds[i][this_input_ones:]
+                    ])
+                )
+            else:
+                llm_inputs.append(
+                    torch.cat([
+                        input_embeds[i][:this_input_ones],
+                        image_embeds[i],
+                        input_embeds[i][this_input_ones:]
+                    ])
+                )
+            if image_atts is None:
+                bs, t, n, dim = image_embeds.size()
+                llm_attention_mask.append(
+                    torch.cat([
+                        input_atts[i][:this_input_ones],
+                        torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                        torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
+                        input_atts[i][this_input_ones:]
+                    ])
+                )
+            else:
+                llm_attention_mask.append(
+                    torch.cat([
+                        input_atts[i][:this_input_ones],
+                        image_atts[i],
+                        input_atts[i][this_input_ones:]
+                    ])
+                )
+            sub_target_index = []
+            for j in end_flag_pos_list[i]:
+                sub_target_index.append([i, j + this_input_ones])
+            wp_target_index.extend(sub_target_index)
+        llm_inputs = torch.stack(llm_inputs, 0)
+        llm_attention_mask = torch.stack(llm_attention_mask, 0)
+        return llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index
+
+    def concat_text_image_input_with_notice(self, input_embeds, input_atts, image_embeds, image_nums,
+                                            end_flag_pos_list, notice_frame_id, notice_text, image_atts=None):
+        '''
+        the function is made for processing data with [inserted] notice text
+        notice_frame_id: how many image frames before the notice
+        attention_mask:
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+        '''
+        input_part_targets_len = []
+        llm_inputs = []
+        llm_attention_mask = []
+        wp_target_index = []
+        bs = image_embeds.size()[0]
+
+        self.llm_tokenizer.padding_side = "right"
+        self.llm_tokenizer.truncation_side = 'left'
+        text_input_tokens = self.llm_tokenizer(
+            notice_text,
+            return_tensors="pt",
+            padding="longest",
+            truncation=True,
+            max_length=self.max_txt_len,
+        ).to(image_embeds.device)
+        input_notice_atts = text_input_tokens.attention_mask
+        notice_embeds = self.llm_model.get_input_embeddings()(text_input_tokens.input_ids)
+
+        for i in range(bs):
+            this_input_ones = input_atts[i].sum()
+            input_part_targets_len.append(this_input_ones)
+
+            this_notice_input_ones = input_notice_atts[i].sum()
+            if image_atts is None:
+                bs, t, n, dim = image_embeds.size()
+                if notice_frame_id[i] <= 0: # which means the scenario do not include any notice
+                    llm_inputs.append(
+                        torch.cat([
+                            input_embeds[i][:this_input_ones],
+                            image_embeds[i].view(t*n, -1),
+                            input_embeds[i][this_input_ones:],
+                            notice_embeds[i][:],
+                        ])
+                    )
+                else:
+                    llm_inputs.append(
+                        torch.cat([
+                            input_embeds[i][:this_input_ones],
+                            image_embeds[i, :notice_frame_id[i]].view(notice_frame_id[i]*n, -1),
+                            notice_embeds[i][:this_notice_input_ones],
+                            image_embeds[i, notice_frame_id[i]:].view((t-notice_frame_id[i])*n, -1),
+                            input_embeds[i][this_input_ones:],
+                            notice_embeds[i][this_notice_input_ones:],
+                        ])
+                    )
+            else:
+                pass #TODO
+            if image_atts is None:
+                bs, t, n, dim = image_embeds.size()
+                if notice_frame_id[i] < 0: # which means the scenario do not include any notice
+                    llm_attention_mask.append(
+                        torch.cat([
+                            input_atts[i][:this_input_ones],
+                            torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                            torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
+                            torch.zeros((input_notice_atts.size(1)), device=image_embeds.device, dtype=torch.long),
+                            input_atts[i][this_input_ones:]
+                        ])
+                    )
+                else:
+                    llm_attention_mask.append(
+                        torch.cat([
+                            input_atts[i][:this_input_ones],
+                            torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                            input_notice_atts[i][:this_notice_input_ones],
+                            torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
+                            input_atts[i][this_input_ones:],
+                            input_notice_atts[i][this_notice_input_ones:],
+                        ])
+                    )
+            else:
+                pass
+            sub_target_index = []
+            for j in range(len(end_flag_pos_list[i])):
+                if j < notice_frame_id[i] or notice_frame_id[i] < 0: # when notice is '', the input_ones is 1, not ZERO
+                    sub_target_index.append([i, end_flag_pos_list[i][j] + this_input_ones])
+                else:
+                    sub_target_index.append([i, end_flag_pos_list[i][j] + this_input_ones + this_notice_input_ones])
+            wp_target_index.extend(sub_target_index)
+        llm_inputs = torch.stack(llm_inputs, 0)
+        llm_attention_mask = torch.stack(llm_attention_mask, 0)
+        return llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index
+
+    def build_gt_waypoints(self, waypoints, valid_frames):
+        gt_waypoints = []
+        for i in range(waypoints.size(0)):
+            gt_waypoints.append(waypoints[i, :valid_frames[i]])
+        gt_waypoints = torch.cat(gt_waypoints, dim=0)
+        return gt_waypoints      
 
 @register_model
 def memfuser_baseline(**kwargs):

@@ -1,4 +1,4 @@
-GPU_NUM=$1
-CONFIG_PATH=$2
+GPU_NUM=1
+CONFIG_PATH= 'lavis/projects/lmdrive/notice_llava15_visual_encoder_r50_seq40.yaml'
 
-srun -p basemodel_lm --quotatype=auto --gres=gpu:$GPU_NUM -N 1 python -m torch.distributed.run --nproc_per_node=$GPU_NUM train.py  --cfg-path $CONFIG_PATH
+python3 train.py  --cfg-path 'lavis/projects/lmdrive/notice_llava15_visual_encoder_r50_seq40.yaml'

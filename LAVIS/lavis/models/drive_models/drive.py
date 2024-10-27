@@ -15,7 +15,7 @@ from peft import LoraConfig, get_peft_model
 
 from lavis.common.registry import registry
 from lavis.models.blip2_models.blip2 import Blip2Base, disabled_train
-from timm import create_model
+# from timm import create_model
 
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""
@@ -373,6 +373,7 @@ class Blip2VicunaDrive(Blip2Base):
 
     def forward(self, samples, inference_mode=False, image_embeds=None):
         if image_embeds is None: # train mode
+            print("当前rgb维度",samples['rgb_front'].size())
             device = samples["rgb_front"].device
             bs = samples['rgb_front'].size(0)
             t = samples['rgb_front'].size(1)

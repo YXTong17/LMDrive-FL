@@ -25,4 +25,4 @@ python3   train_pretrain.py  "/home/tyx/yjl/LMDrive/vision_encoder/"  --dataset 
     --multi-view --with-lidar --multi-view-input-size 3 128 128 \
     --smoothed_l1 \
     --experiment memfuser_e1d3 \
-    --pretrained
+    --pretrained 

@@ -47,10 +47,8 @@ from .twins import *
 from .interfuser import *
 from .pointpillar import *
 from .memfuser import *
-
-from .memfuser_client import *
-
-# from .memfuser_edge_server import *
+from .memfuser_client import * #* 这里额外添加构建model方法给register_model
+# from .memfuser_egde_server import memfuser_baseline_e1d3_edge_server #* 这里额外添加构建model方法给register_model
 
 from .factory import create_model, split_model_name, safe_model_name
 from .helpers import load_checkpoint, resume_checkpoint, model_parameters

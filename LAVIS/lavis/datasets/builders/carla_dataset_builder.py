@@ -53,7 +53,6 @@ class CarlaDatasetBuilder(BaseDatasetBuilder):
             enable_start_frame_augment = ann_info.get(split).enable_start_frame_augment
             token_max_length = ann_info.get(split).token_max_length
             enable_notice = ann_info.get(split).enable_notice
-
             # create datasets
             datasets[split] = CarlaFLDataset(
                 dataset_root=ann_path,
@@ -63,6 +62,7 @@ class CarlaDatasetBuilder(BaseDatasetBuilder):
                 enable_start_frame_augment=enable_start_frame_augment,
                 token_max_length=token_max_length,
                 enable_notice=enable_notice,
+                
             )
 
         return datasets

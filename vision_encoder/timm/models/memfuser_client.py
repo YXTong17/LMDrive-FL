@@ -1,35 +1,24 @@
+import math
 import copy
 import logging
-import math
+from typing import Optional, List
 from collections import OrderedDict
 from functools import partial
-from typing import List, Optional
-
-import numpy
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
-from torch import Tensor, nn
-
-from .layers import StdConv2d, StdConv2dSame, to_2tuple
-from .pointpillar import ConvBackbone, PointPillarNet
+import numpy
+import torch
+from torch import nn, Tensor
+import torch.nn.functional as F
+import torch.nn as nn
+import numpy as np
 from .registry import register_model
-from .resnet import (
-    resnet18d,
-    resnet26,
-    resnet26d,
-    resnet34d,
-    resnet50,
-    resnet50d,
-    resnet101d,
-)
+from .resnet import resnet26d, resnet50d, resnet18d, resnet26, resnet50, resnet101d, resnet34d
+from .layers import StdConv2dSame, StdConv2d, to_2tuple
+from .pointpillar import PointPillarNet, ConvBackbone
 
 _logger = logging.getLogger(__name__)
 
-
-# 迁移LayerNorm
+#迁移LayerNorm
 class LayerNorm(nn.LayerNorm):
     """Subclass torch's LayerNorm to handle fp16."""
 
@@ -37,6 +26,11 @@ class LayerNorm(nn.LayerNorm):
         orig_type = x.dtype
         ret = super().forward(x.type(torch.float32))
         return ret.type(orig_type)
+
+
+
+
+
 
 
 class HybridEmbed(nn.Module):
@@ -62,9 +56,7 @@ class HybridEmbed(nn.Module):
                 if training:
                     backbone.eval()
                 backbone.cuda()
-                o = self.backbone(
-                    torch.zeros(1, in_chans, img_size[0], img_size[1]).cuda()
-                )
+                o = self.backbone(torch.zeros(1, in_chans, img_size[0], img_size[1]).cuda())
                 if isinstance(o, (list, tuple)):
                     o = o[-1]  # last feature if backbone outputs list/tuple of features
                 feature_size = o.shape[-2:]
@@ -120,9 +112,8 @@ class PositionEmbeddingSine(nn.Module):
 
         dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
         # dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
-        dim_t = self.temperature ** (
-            2 * torch.div(dim_t, 2, rounding_mode="floor") / self.num_pos_feats
-        )
+        dim_t = self.temperature ** (2 * torch.div(dim_t, 2, rounding_mode='floor') / self.num_pos_feats)
+
 
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
@@ -213,7 +204,6 @@ class SpatialSoftmax(nn.Module):
         feature_keypoints[:, :, 1] = (feature_keypoints[:, :, 1] - 1) * 12
         feature_keypoints[:, :, 0] = feature_keypoints[:, :, 0] * 12
         return feature_keypoints
-
 
 class GRUWaypointsPredictor(nn.Module):
     def __init__(self, input_dim, waypoints=5):
@@ -501,34 +491,25 @@ def _get_activation_fn(activation):
 
 
 class LidarModel(nn.Module):
-    def __init__(
-        self,
-        num_input=9,
-        num_features=[32, 32],
-        backbone="conv",
-        min_x=-20,
-        max_x=30,
-        min_y=-25,
-        max_y=25,
+    def __init__(self, num_input=9, num_features=[32,32],
+        backbone='conv',
+        min_x=-20, max_x=30,
+        min_y=-25, max_y=25,
         pixels_per_meter=4,
-        output_features=256,
-    ):
+        output_features=256):
 
         super().__init__()
 
         self.point_pillar_net = PointPillarNet(
-            num_input,
-            num_features,
-            min_x=min_x,
-            max_x=max_x,
-            min_y=min_y,
-            max_y=max_y,
+            num_input, num_features,
+            min_x=min_x, max_x=max_x,
+            min_y=min_y, max_y=max_y,
             pixels_per_meter=pixels_per_meter,
         )
 
         num_feature = num_features[-1]
         self.backbone = ConvBackbone(num_feature=num_feature)
-        self.reduce_size = nn.Conv2d(6 * num_feature, output_features, 2, 2)
+        self.reduce_size = nn.Conv2d(6*num_feature, output_features, 2, 2)
 
     def forward(self, lidars, num_points):
         features = self.point_pillar_net(lidars, num_points)
@@ -573,9 +554,9 @@ class Memfuser_Client(nn.Module):
     ):
         super().__init__()
         self.traffic_pred_head_type = traffic_pred_head_type
-        self.num_features = self.embed_dim = (
-            embed_dim  # num_features for consistency with other models
-        )
+        self.num_features = (
+            self.embed_dim
+        ) = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
 
@@ -615,17 +596,10 @@ class Memfuser_Client(nn.Module):
                 out_indices=[4],
             )
 
-        self.lidar_backbone = LidarModel(
-            num_input=9,
-            num_features=[32, 32],
-            backbone="conv",
-            min_x=-25,
-            max_x=35,
-            min_y=-30,
-            max_y=30,
-            pixels_per_meter=4,
-            output_features=embed_dim,
-        )
+        self.lidar_backbone = LidarModel(num_input=9, num_features=[32,32],
+                                         backbone='conv', min_x=-25, max_x=35,
+                                         min_y=-30, max_y=30, pixels_per_meter=4,
+                                         output_features=embed_dim)
 
         rgb_embed_layer = partial(HybridEmbed, backbone=self.rgb_backbone)
 
@@ -684,6 +658,12 @@ class Memfuser_Client(nn.Module):
         )
         self.velocity_fc = nn.Linear(1, embed_dim)
         self.reset_parameters()
+        
+
+
+
+
+
 
     def reset_parameters(self):
         nn.init.uniform_(self.global_embed)
@@ -807,6 +787,7 @@ class Memfuser_Client(nn.Module):
             )
             features.extend([front_center_image_token, front_center_image_token_global])
 
+
         if self.with_rear_sensor:
             # Rear view processing
             (
@@ -820,71 +801,65 @@ class Memfuser_Client(nn.Module):
                     + self.position_encoding(rear_image_token)
                 )
             else:
-                rear_image_token = rear_image_token + self.position_encoding(
+                rear_image_token = (
                     rear_image_token
+                    + self.position_encoding(rear_image_token)
                 )
 
-            rear_image_token = rear_image_token.flatten(2).permute(2, 0, 1)
+            rear_image_token = rear_image_token.flatten(2).permute(
+                2, 0, 1
+            )
             rear_image_token_global = (
                 rear_image_token_global
                 + self.view_embed[:, :, 4, :]
                 + self.global_embed[:, :, 5:6]
             )
-            rear_image_token_global = rear_image_token_global.permute(2, 0, 1)
+            rear_image_token_global = rear_image_token_global.permute(
+                2, 0, 1
+            )
             features.extend([rear_image_token, rear_image_token_global])
 
-        lidar_token = self.lidar_backbone(
-            lidar, num_points
-        )  # Batchsize * embed_dim * 50 * 50
-        lidar_token = lidar_token + self.position_encoding(lidar_token)
+        lidar_token = self.lidar_backbone(lidar, num_points) # Batchsize * embed_dim * 50 * 50
+        lidar_token = (
+            lidar_token
+            + self.position_encoding(lidar_token)
+        )
         lidar_token = lidar_token.flatten(2).permute(2, 0, 1)
 
         features = torch.cat(features, 0)
         return features, lidar_token
 
     def forward(self, x):
-        self.return_feature = False  # 取消直接返回的推理模型
+        self.return_feature = False #取消直接返回的推理模型
         front_image = x["rgb_front"]
-        # 添加Drive Model部分代码
+        #添加Drive Model部分代码
         device = front_image.device
         # print("当前的维度：",front_image.size())
         bs_llm = front_image.size(0)
-        t = front_image.size(1)
+        t  = front_image.size(1)
         temp = dict()
-        for key in [
-            "rgb_front",
-            "rgb_left",
-            "rgb_right",
-            "rgb_rear",
-            "rgb_center",
-            "lidar",
-            "num_points",
-            "velocity",
-            "command",
-            "measurements",
-            "heatmap_mask",
-            "target_point",
-        ]:
+        for key in ['rgb_front', 'rgb_left', 'rgb_right', 'rgb_rear', 'rgb_center', 'lidar', 'num_points', 'velocity', 
+                    'command','measurements',  'heatmap_mask','target_point']:
             shapz = x[key].size()
             temp[key] = x[key]
-            x[key] = x[key].view(bs_llm * t, *shapz[2:])
-
+            x[key] = x[key].view(bs_llm*t, *shapz[2:])
+            
         front_image = x["rgb_front"]
         left_image = x["rgb_left"]
         right_image = x["rgb_right"]
         rear_image = x["rgb_rear"]
         front_center_image = x["rgb_center"]
         lidar = x["lidar"]
-        num_points = x["num_points"]
+        num_points = x['num_points']
         ###
-
+        
         if not self.return_feature:
-            velocity = x["velocity"].view(1, -1, 1)
+            velocity = x['velocity'].view(1, -1, 1)
             target_point = x["target_point"]
             velocity_feature = self.velocity_fc(velocity)
             velocity_feature = velocity_feature.repeat(6, 1, 1)
         else:
-            velocity = x["velocity"]
+            velocity = x['velocity']
             velocity = velocity.view(1, -1, 1)
             velocity_feature = self.velocity_fc(velocity)
             velocity_feature = velocity_feature.repeat(6, 1, 1)
@@ -923,12 +898,11 @@ class Memfuser_Client(nn.Module):
         stop_sign_feature = hs[:, 2500]
         waypoints_feature = hs[:, 2501:2506]
 
+
         if self.waypoints_pred_head == "gru":
             waypoints = self.waypoints_generator(waypoints_feature, target_point)
         elif self.waypoints_pred_head == "gru-command":
-            waypoints = self.waypoints_generator(
-                waypoints_feature, target_point, measurements
-            )
+            waypoints = self.waypoints_generator(waypoints_feature, target_point, measurements)
 
         traffic_light_state = self.traffic_light_pred_head(traffic_light_state_feature)
         stop_sign = self.stop_sign_head(stop_sign_feature)
@@ -939,48 +913,25 @@ class Memfuser_Client(nn.Module):
         traffic = self.traffic_pred_head(traffic_feature_with_vel)
 
         # with Blip2Base.maybe_autocast():#如果在GPU上，使用混合精度
-        # 添加Drive Model部分代码
+        #添加Drive Model部分代码
         traffic_feature = traffic_feature.reshape(bs, 50, 50, -1).permute(0, 3, 1, 2)
-        traffic_feature = (
-            F.adaptive_avg_pool2d(traffic_feature, (10, 10))
-            .view(bs, -1, 100)
-            .permute(0, 2, 1)
-        )
-        image_embeds = torch.cat(
-            [
-                traffic_feature,
-                traffic_light_state_feature.view(bs, 1, -1),
-                waypoints_feature,
-            ],
-            1,
-        )
-        # return waypoints_feature[:, :5]
-        parameter = [device, bs_llm, t]
+        traffic_feature = F.adaptive_avg_pool2d(traffic_feature, (10, 10)).view(bs, -1, 100).permute(0, 2, 1)
+        image_embeds = torch.cat([traffic_feature, traffic_light_state_feature.view(bs, 1, -1), waypoints_feature], 1)
+            # return waypoints_feature[:, :5]
+        parameter = [device,bs_llm,t]
 
-        return (
-            traffic,
-            waypoints,
-            traffic_light_state,
-            stop_sign,
-            traffic_feature,
-            image_embeds,
-            parameter,
-        )
 
-    def concat_text_image_input(
-        self,
-        input_embeds,
-        input_atts,
-        image_embeds,
-        image_nums,
-        end_flag_pos_list,
-        image_atts=None,
-    ):
-        """
+
+
+
+
+        return traffic, waypoints, traffic_light_state, stop_sign, traffic_feature,image_embeds,parameter
+    def concat_text_image_input(self, input_embeds, input_atts, image_embeds, image_nums, end_flag_pos_list, image_atts=None):
+        '''
         attention_mask:
             - 1 for tokens that are **not masked**,
             - 0 for tokens that are **masked**.
-        """
+        '''
         input_part_targets_len = []
         llm_inputs = []
         llm_attention_mask = []
@@ -992,53 +943,37 @@ class Memfuser_Client(nn.Module):
             if image_atts is None:
                 bs, t, n, dim = image_embeds.size()
                 llm_inputs.append(
-                    torch.cat(
-                        [
-                            input_embeds[i][:this_input_ones],
-                            image_embeds[i].view(t * n, -1),
-                            input_embeds[i][this_input_ones:],
-                        ]
-                    )
+                    torch.cat([
+                        input_embeds[i][:this_input_ones],
+                        image_embeds[i].view(t*n, -1),
+                        input_embeds[i][this_input_ones:]
+                    ])
                 )
             else:
                 llm_inputs.append(
-                    torch.cat(
-                        [
-                            input_embeds[i][:this_input_ones],
-                            image_embeds[i],
-                            input_embeds[i][this_input_ones:],
-                        ]
-                    )
+                    torch.cat([
+                        input_embeds[i][:this_input_ones],
+                        image_embeds[i],
+                        input_embeds[i][this_input_ones:]
+                    ])
                 )
             if image_atts is None:
                 bs, t, n, dim = image_embeds.size()
                 llm_attention_mask.append(
-                    torch.cat(
-                        [
-                            input_atts[i][:this_input_ones],
-                            torch.ones(
-                                (image_nums[i] * n),
-                                device=image_embeds.device,
-                                dtype=torch.long,
-                            ),
-                            torch.zeros(
-                                ((t - image_nums[i]) * n),
-                                device=image_embeds.device,
-                                dtype=torch.long,
-                            ),
-                            input_atts[i][this_input_ones:],
-                        ]
-                    )
+                    torch.cat([
+                        input_atts[i][:this_input_ones],
+                        torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                        torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
+                        input_atts[i][this_input_ones:]
+                    ])
                 )
             else:
                 llm_attention_mask.append(
-                    torch.cat(
-                        [
-                            input_atts[i][:this_input_ones],
-                            image_atts[i],
-                            input_atts[i][this_input_ones:],
-                        ]
-                    )
+                    torch.cat([
+                        input_atts[i][:this_input_ones],
+                        image_atts[i],
+                        input_atts[i][this_input_ones:]
+                    ])
                 )
             sub_target_index = []
             for j in end_flag_pos_list[i]:
@@ -1048,24 +983,15 @@ class Memfuser_Client(nn.Module):
         llm_attention_mask = torch.stack(llm_attention_mask, 0)
         return llm_inputs, llm_attention_mask, input_part_targets_len, wp_target_index
 
-    def concat_text_image_input_with_notice(
-        self,
-        input_embeds,
-        input_atts,
-        image_embeds,
-        image_nums,
-        end_flag_pos_list,
-        notice_frame_id,
-        notice_text,
-        image_atts=None,
-    ):
-        """
+    def concat_text_image_input_with_notice(self, input_embeds, input_atts, image_embeds, image_nums,
+                                            end_flag_pos_list, notice_frame_id, notice_text, image_atts=None):
+        '''
         the function is made for processing data with [inserted] notice text
         notice_frame_id: how many image frames before the notice
         attention_mask:
             - 1 for tokens that are **not masked**,
             - 0 for tokens that are **masked**.
-        """
+        '''
         input_part_targets_len = []
         llm_inputs = []
         llm_attention_mask = []
@@ -1073,7 +999,7 @@ class Memfuser_Client(nn.Module):
         bs = image_embeds.size()[0]
 
         self.llm_tokenizer.padding_side = "right"
-        self.llm_tokenizer.truncation_side = "left"
+        self.llm_tokenizer.truncation_side = 'left'
         text_input_tokens = self.llm_tokenizer(
             notice_text,
             return_tensors="pt",
@@ -1082,9 +1008,7 @@ class Memfuser_Client(nn.Module):
             max_length=self.max_txt_len,
         ).to(image_embeds.device)
         input_notice_atts = text_input_tokens.attention_mask
-        notice_embeds = self.llm_model.get_input_embeddings()(
-            text_input_tokens.input_ids
-        )
+        notice_embeds = self.llm_model.get_input_embeddings()(text_input_tokens.input_ids)
 
         for i in range(bs):
             this_input_ones = input_atts[i].sum()
@@ -1093,106 +1017,59 @@ class Memfuser_Client(nn.Module):
             this_notice_input_ones = input_notice_atts[i].sum()
             if image_atts is None:
                 bs, t, n, dim = image_embeds.size()
-                if (
-                    notice_frame_id[i] <= 0
-                ):  # which means the scenario do not include any notice
+                if notice_frame_id[i] <= 0: # which means the scenario do not include any notice
                     llm_inputs.append(
-                        torch.cat(
-                            [
-                                input_embeds[i][:this_input_ones],
-                                image_embeds[i].view(t * n, -1),
-                                input_embeds[i][this_input_ones:],
-                                notice_embeds[i][:],
-                            ]
-                        )
+                        torch.cat([
+                            input_embeds[i][:this_input_ones],
+                            image_embeds[i].view(t*n, -1),
+                            input_embeds[i][this_input_ones:],
+                            notice_embeds[i][:],
+                        ])
                     )
                 else:
                     llm_inputs.append(
-                        torch.cat(
-                            [
-                                input_embeds[i][:this_input_ones],
-                                image_embeds[i, : notice_frame_id[i]].view(
-                                    notice_frame_id[i] * n, -1
-                                ),
-                                notice_embeds[i][:this_notice_input_ones],
-                                image_embeds[i, notice_frame_id[i] :].view(
-                                    (t - notice_frame_id[i]) * n, -1
-                                ),
-                                input_embeds[i][this_input_ones:],
-                                notice_embeds[i][this_notice_input_ones:],
-                            ]
-                        )
+                        torch.cat([
+                            input_embeds[i][:this_input_ones],
+                            image_embeds[i, :notice_frame_id[i]].view(notice_frame_id[i]*n, -1),
+                            notice_embeds[i][:this_notice_input_ones],
+                            image_embeds[i, notice_frame_id[i]:].view((t-notice_frame_id[i])*n, -1),
+                            input_embeds[i][this_input_ones:],
+                            notice_embeds[i][this_notice_input_ones:],
+                        ])
                     )
             else:
-                pass  # TODO
+                pass #TODO
             if image_atts is None:
                 bs, t, n, dim = image_embeds.size()
-                if (
-                    notice_frame_id[i] < 0
-                ):  # which means the scenario do not include any notice
+                if notice_frame_id[i] < 0: # which means the scenario do not include any notice
                     llm_attention_mask.append(
-                        torch.cat(
-                            [
-                                input_atts[i][:this_input_ones],
-                                torch.ones(
-                                    (image_nums[i] * n),
-                                    device=image_embeds.device,
-                                    dtype=torch.long,
-                                ),
-                                torch.zeros(
-                                    ((t - image_nums[i]) * n),
-                                    device=image_embeds.device,
-                                    dtype=torch.long,
-                                ),
-                                torch.zeros(
-                                    (input_notice_atts.size(1)),
-                                    device=image_embeds.device,
-                                    dtype=torch.long,
-                                ),
-                                input_atts[i][this_input_ones:],
-                            ]
-                        )
+                        torch.cat([
+                            input_atts[i][:this_input_ones],
+                            torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                            torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
+                            torch.zeros((input_notice_atts.size(1)), device=image_embeds.device, dtype=torch.long),
+                            input_atts[i][this_input_ones:]
+                        ])
                     )
                 else:
                     llm_attention_mask.append(
-                        torch.cat(
-                            [
-                                input_atts[i][:this_input_ones],
-                                torch.ones(
-                                    (image_nums[i] * n),
-                                    device=image_embeds.device,
-                                    dtype=torch.long,
-                                ),
-                                input_notice_atts[i][:this_notice_input_ones],
-                                torch.zeros(
-                                    ((t - image_nums[i]) * n),
-                                    device=image_embeds.device,
-                                    dtype=torch.long,
-                                ),
-                                input_atts[i][this_input_ones:],
-                                input_notice_atts[i][this_notice_input_ones:],
-                            ]
-                        )
+                        torch.cat([
+                            input_atts[i][:this_input_ones],
+                            torch.ones((image_nums[i]*n), device=image_embeds.device, dtype=torch.long),
+                            input_notice_atts[i][:this_notice_input_ones],
+                            torch.zeros(((t-image_nums[i])*n), device=image_embeds.device, dtype=torch.long),
+                            input_atts[i][this_input_ones:],
+                            input_notice_atts[i][this_notice_input_ones:],
+                        ])
                     )
             else:
                 pass
             sub_target_index = []
             for j in range(len(end_flag_pos_list[i])):
-                if (
-                    j < notice_frame_id[i] or notice_frame_id[i] < 0
-                ):  # when notice is '', the input_ones is 1, not ZERO
-                    sub_target_index.append(
-                        [i, end_flag_pos_list[i][j] + this_input_ones]
-                    )
+                if j < notice_frame_id[i] or notice_frame_id[i] < 0: # when notice is '', the input_ones is 1, not ZERO
+                    sub_target_index.append([i, end_flag_pos_list[i][j] + this_input_ones])
                 else:
-                    sub_target_index.append(
-                        [
-                            i,
-                            end_flag_pos_list[i][j]
-                            + this_input_ones
-                            + this_notice_input_ones,
-                        ]
-                    )
+                    sub_target_index.append([i, end_flag_pos_list[i][j] + this_input_ones + this_notice_input_ones])
             wp_target_index.extend(sub_target_index)
         llm_inputs = torch.stack(llm_inputs, 0)
         llm_attention_mask = torch.stack(llm_attention_mask, 0)
@@ -1201,9 +1078,10 @@ class Memfuser_Client(nn.Module):
     def build_gt_waypoints(self, waypoints, valid_frames):
         gt_waypoints = []
         for i in range(waypoints.size(0)):
-            gt_waypoints.append(waypoints[i, : valid_frames[i]])
+            gt_waypoints.append(waypoints[i, :valid_frames[i]])
         gt_waypoints = torch.cat(gt_waypoints, dim=0)
-        return gt_waypoints
+        return gt_waypoints      
+
 
 
 @register_model
@@ -1217,3 +1095,6 @@ def memfuser_baseline_e1d3_client(**kwargs):
         waypoints_pred_head="gru",
     )
     return model
+
+
+

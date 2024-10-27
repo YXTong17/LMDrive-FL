@@ -251,7 +251,6 @@ class RunnerBase:
                     collate_fns.append([getattr(d, "collater", None) for d in dataset])
                 else:
                     collate_fns.append(getattr(dataset, "collater", None))
-
             dataloaders = self.create_loaders(
                 datasets=datasets,
                 num_workers=self.config.run_cfg.num_workers,
@@ -409,7 +408,7 @@ class RunnerBase:
             if self.evaluate_only:
                 break
 
-            dist.barrier()
+            # dist.barrier()
 
         # testing phase
         test_epoch = "best" if len(self.valid_splits) > 0 else cur_epoch

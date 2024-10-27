@@ -6,7 +6,7 @@
 model:
   arch: vicuna_drive 
   model_type: vicuna7b
-  preception_model: memfuser_baseline_e1d3
+  preception_model: memfuser_baseline_e1d3_client
   preception_model_ckpt: ../vision_encoder/sensor_pretrain.pth.tar.r50
   llm_model: /home/tyx/yjl/LMDrive-FL/model_temp/llama
   # llm_model: /home/tyx/yjl/LLamaTest/model_saved
